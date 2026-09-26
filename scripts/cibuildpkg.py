@@ -134,6 +134,10 @@ class Package:
     source_filename: str = ""
     source_strip_components: int = 1
     when: When = When.always
+    # Raven --gpl-child: build this package as a static library (autoconf: --enable-static
+    # --disable-shared; cmake: BUILD_SHARED_LIBS=0) so the GPL encoder helper links it in and
+    # carries no shared library of its own.
+    static: bool = False
 
     def __lt__(self, other):
         return self.name < other.name
@@ -249,8 +253,8 @@ class Builder:
         env = self._environment(for_builder=for_builder)
         prefix = self._prefix(for_builder=for_builder)
         configure_args = [
-            "--disable-static",
-            "--enable-shared",
+            "--enable-static" if package.static else "--disable-static",
+            "--disable-shared" if package.static else "--enable-shared",
             "--libdir=" + self._mangle_path(os.path.join(prefix, "lib")),
             "--prefix=" + self._mangle_path(prefix),
         ]
@@ -302,7 +306,7 @@ class Builder:
         prefix = self._prefix(for_builder=for_builder)
         cmake_args = [
             "-GUnix Makefiles",
-            "-DBUILD_SHARED_LIBS=1",
+            "-DBUILD_SHARED_LIBS=0" if package.static else "-DBUILD_SHARED_LIBS=1",
             "-DCMAKE_INSTALL_LIBDIR=lib",
             "-DCMAKE_INSTALL_PREFIX=" + prefix,
         ]
@@ -350,6 +354,14 @@ class Builder:
     def _build_x265(self, package: Package, for_builder: bool) -> None:
         assert package.name == "x265"
         assert len(package.build_arguments) == 0
+
+        if package.static:
+            # Raven --gpl-child: one 8-bit static library. Raven's helper encodes 8-bit 4:2:0
+            # (H.265 Main) only, and the three-way 10/12-bit link below produces archives that
+            # would have to be merged into one for a static link.
+            package.build_arguments = ["-DENABLE_SHARED=0", "-DENABLE_CLI=0"]
+            self._build_with_cmake(package=package, for_builder=for_builder)
+            return
 
         # Build x265 three times:
         #  1: Build 12 bits static library version

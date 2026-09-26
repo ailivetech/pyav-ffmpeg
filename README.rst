@@ -16,8 +16,17 @@ shipped with -- and given one new mode, ``scripts/build-ffmpeg.py --lgpl``:
 The workflow builds only Raven's two platforms (macOS arm64, Windows x86_64) and, on a
 ``7.1-<n>-raven-lgpl-<m>`` tag, attaches the tarballs to a GitHub Release. Raven's
 ``ffmpeg_lgpl/fetch_drop.py`` downloads them from there; Raven's private PyAV wheel is
-built against them (see Raven's ``docs/ffmpeg-gpl-lgpl-split-plan.md``). Everything
-below this section is upstream's README, unchanged.
+built against them (see Raven's ``docs/ffmpeg-gpl-lgpl-split-plan.md``).
+
+The fork's second product is ``scripts/build-ffmpeg.py --gpl-child``: Raven's **GPL encoder
+helper** -- an unmodified, static ``ffmpeg`` executable built with ``--enable-gpl
+--enable-libx264 --enable-libx265`` and nothing else enabled (the NUT demuxer/muxer, the
+rawvideo decoder, the pipe protocol), which Raven runs as a separate process fed over pipes so
+that libx264/libx265 never enter Raven's own process. A ``7.1-<n>-raven-gpl-child-<m>`` tag
+builds it on both platforms and attaches ``ffmpeg-gpl-child-<platform>.tar.gz`` (``bin/ffmpeg``,
+``src/`` = the corresponding source of everything linked in, ``CONFIGURE.txt``) to a Release;
+Raven's ``gpl_encoder_helper/fetch_helper.py`` downloads it. Everything below this section is
+upstream's README, unchanged.
 
 .. _AI Live Technologies: https://raven.video/
 .. _pyav-ffmpeg: https://github.com/PyAV-Org/pyav-ffmpeg

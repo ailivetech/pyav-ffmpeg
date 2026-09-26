@@ -4,13 +4,26 @@
 # Only the two platforms Raven ships are built. A tag matching 7.1-*-raven-lgpl* also
 # attaches the tarballs to a GitHub Release, which is where Raven's ffmpeg_lgpl/fetch_drop.py
 # downloads them from.
+#
+# A tag matching 7.1-*-raven-gpl-child* builds the OTHER product of this fork instead: the
+# --gpl-child mode (a static GPL `ffmpeg` with x264/x265 only -- Raven's out-of-process encoder
+# helper, docs/ffmpeg-gpl-lgpl-split-plan.md FS16) and attaches ffmpeg-gpl-child-<platform>.tar.gz
+# (bin/ffmpeg, src/ = the corresponding source, CONFIGURE.txt), which Raven's
+# gpl_encoder_helper/fetch_helper.py downloads.
 name: build-ffmpeg
 # Builds on a release tag (one ~1-2 h run per tag, both platforms) or by hand; a branch
-# push alone does not build.
+# push alone does not build. workflow_dispatch takes the mode as an input.
 on:
   push:
-    tags: ['7.1-*-raven-lgpl*']
+    tags: ['7.1-*-raven-lgpl*', '7.1-*-raven-gpl-child*']
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'recipe mode'
+        required: true
+        default: 'lgpl'
+        type: choice
+        options: ['lgpl', 'gpl-child']
 permissions:
   contents: write
 jobs:
@@ -48,11 +61,19 @@ jobs:
           install: base-devel mingw-w64-x86_64-gcc mingw-w64-x86_64-gperf mingw-w64-x86_64-nasm mingw-w64-x86_64-openssl openssl-devel
           path-type: inherit
           release: false
-      - name: Build FFmpeg (LGPL)
+      - name: Pick the recipe mode from the tag
+        run: |
+          if [[ "${{ github.ref }}" == *raven-gpl-child* || "${{ github.event.inputs.mode }}" == "gpl-child" ]]; then
+            echo "RECIPE_MODE=--gpl-child" >> $GITHUB_ENV
+          else
+            echo "RECIPE_MODE=--lgpl --enable-cuda" >> $GITHUB_ENV
+          fi
+          tail -1 $GITHUB_ENV
+      - name: Build FFmpeg
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_BEFORE_BUILD: python scripts/build-ffmpeg.py /tmp/vendor --lgpl --enable-cuda
-          CIBW_BEFORE_BUILD_WINDOWS: python scripts\build-ffmpeg.py C:\cibw\vendor --lgpl --enable-cuda
+          CIBW_BEFORE_BUILD: python scripts/build-ffmpeg.py /tmp/vendor ${{ env.RECIPE_MODE }}
+          CIBW_BEFORE_BUILD_WINDOWS: python scripts\build-ffmpeg.py C:\cibw\vendor ${{ env.RECIPE_MODE }}
           CIBW_BUILD: cp311-*
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: delvewheel repair --add-path C:\cibw\vendor\bin -w {dest_dir} {wheel}
           CIBW_SKIP: "*musllinux*"

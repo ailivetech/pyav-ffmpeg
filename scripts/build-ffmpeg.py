@@ -249,10 +249,19 @@ ffmpeg_package = Package(
 # SRT legs need it. gmp is still built on Linux, where gnutls's nettle requires it.
 LGPL_EXCLUDED_PACKAGES = {"x264", "x265", "opencore-amr", "openh264", "fdk_aac"}
 
+# Raven --gpl-child mode: the GPL encoder helper (Raven's docs/ffmpeg-gpl-lgpl-split-plan.md,
+# FS16) -- an unmodified, STATIC `ffmpeg` executable carrying nothing but x264 and x265, the NUT
+# demuxer/muxer, the rawvideo decoder and the pipe protocol. Raven runs it as a separate process
+# fed over pipes, so it must not carry (or need) any shared FFmpeg library that could be confused
+# with the LGPL one Raven loads in-process. Only these packages are built, all static.
+GPL_CHILD_PACKAGES = {"x264", "x265"}
 
-def package_wanted(package: Package, community: bool, lgpl: bool, use_gnutls: bool) -> bool:
+
+def package_wanted(package: Package, community: bool, lgpl: bool, use_gnutls: bool, gpl_child: bool = False) -> bool:
     if package.when == When.never:
         return False
+    if gpl_child:
+        return package.name in GPL_CHILD_PACKAGES
     if lgpl:
         if package.name in LGPL_EXCLUDED_PACKAGES:
             return False
@@ -315,7 +324,92 @@ def copy_openssl_runtime(bin_dir: str) -> None:
             )
 
 
-def download_tars(use_gnutls: bool, community: bool, lgpl: bool = False) -> None:
+def gpl_child_configure_arguments() -> list[str]:
+    """FFmpeg's configure line for the GPL encoder helper: everything off, then exactly what the
+    child's command line uses (Raven's gpl_encoder_child.py): `-f nut -i pipe:0` (the nut
+    demuxer, the rawvideo decoder, the pipe protocol), `-c:v libx264` / `libx265`, `-f nut pipe:1`
+    (the nut muxer). The ffmpeg program itself auto-selects the filters it inserts (format, null,
+    trim...); scale/fps/setpts are enabled for the conversions the CLI may still insert. Static
+    link of everything, x265's C++ runtime included; no network, no autodetected system libs."""
+    arguments = [
+        "--disable-everything",
+        "--disable-doc",
+        "--disable-network",
+        "--disable-autodetect",
+        "--disable-ffprobe",
+        "--disable-ffplay",
+        "--disable-avdevice",
+        "--disable-postproc",
+        "--enable-gpl",
+        "--enable-libx264",
+        "--enable-libx265",
+        "--enable-encoder=libx264,libx265",
+        "--enable-decoder=rawvideo",
+        "--enable-demuxer=nut,rawvideo",
+        "--enable-muxer=nut",
+        "--enable-protocol=pipe,file",
+        "--enable-filter=null,format,scale,fps,setpts,trim",
+        "--pkg-config-flags=--static",
+    ]
+    if plat == "Windows":
+        # A fully static mingw executable: libgcc, libstdc++ (x265) and winpthread linked in.
+        arguments += ["--extra-ldflags=-static", "--extra-libs=-lstdc++ -lpthread"]
+    elif plat == "Darwin":
+        arguments += ["--extra-libs=-lc++"]
+    return arguments
+
+
+def package_gpl_child(dest_dir: str, output_dir: str) -> str:
+    """The helper's tarball: bin/ffmpeg(.exe), src/ (the corresponding source: ffmpeg, x264,
+    x265 -- GPLv3 section 6, shipped beside the binary by Raven's installer), CONFIGURE.txt.
+    Refuses a binary that still imports a shared FFmpeg / x264 / x265 library."""
+    exe_name = "ffmpeg.exe" if plat == "Windows" else "ffmpeg"
+    exe = os.path.join(dest_dir, "bin", exe_name)
+    if not os.path.exists(exe):
+        raise FileNotFoundError(f"{exe} was not built")
+    run(["strip", "-S" if plat == "Darwin" else "-s", exe])
+    if plat == "Windows":
+        listing = subprocess.run(["objdump", "-p", exe], check=True, stdout=subprocess.PIPE).stdout.decode(errors="replace")
+        imports = [m.group(1) for m in re.finditer(r"DLL Name:\s*(\S+)", listing)]
+        print("ffmpeg.exe imports:", imports)
+        bad = [d for d in imports if re.search(r"avcodec|avformat|avutil|swscale|swresample|avfilter|x264|x265|libstdc|libgcc|winpthread", d, re.I)]
+        if bad:
+            raise RuntimeError(f"the GPL child is not self-contained: it imports {bad}")
+    else:
+        listing = subprocess.run(["otool", "-L", exe], check=True, stdout=subprocess.PIPE).stdout.decode(errors="replace")
+        print("ffmpeg links:", listing)
+        bad = [line.strip() for line in listing.splitlines()[1:] if "/usr/lib/" not in line and "/System/" not in line]
+        if bad:
+            raise RuntimeError(f"the GPL child is not self-contained: it links {bad}")
+    version = subprocess.run([exe, "-hide_banner", "-version"], check=True, stdout=subprocess.PIPE).stdout.decode(errors="replace")
+    print(version)
+    for switch in ("--enable-gpl", "--enable-libx264", "--enable-libx265", "--enable-static", "--disable-shared"):
+        if switch not in version:
+            raise RuntimeError(f"the GPL child's configure line lacks {switch}")
+    encoders = subprocess.run([exe, "-hide_banner", "-encoders"], check=True, stdout=subprocess.PIPE).stdout.decode(errors="replace")
+    for name in ("libx264", "libx265"):
+        if f" {name} " not in encoders:
+            raise RuntimeError(f"the GPL child has no {name} encoder")
+
+    staging = os.path.join(dest_dir, "gpl-child")
+    if os.path.exists(staging):
+        shutil.rmtree(staging)
+    os.makedirs(os.path.join(staging, "bin"))
+    os.makedirs(os.path.join(staging, "src"))
+    shutil.copy(exe, os.path.join(staging, "bin", exe_name))
+    source_dir = os.path.abspath("source")
+    for package in [ffmpeg_package] + [p for p in codec_group if p.name in GPL_CHILD_PACKAGES]:
+        tarball = os.path.join(source_dir, package.source_filename or package.source_url.split("/")[-1])
+        shutil.copy(tarball, os.path.join(staging, "src", os.path.basename(tarball)))
+    with open(os.path.join(staging, "CONFIGURE.txt"), "w") as fp:
+        fp.write(" ".join(ffmpeg_package.build_arguments) + "\n")
+    os.makedirs(output_dir, exist_ok=True)
+    output_tarball = os.path.join(output_dir, f"ffmpeg-gpl-child-{get_platform()}.tar.gz")
+    run(["tar", "czvf", output_tarball, "-C", staging, "bin", "src", "CONFIGURE.txt"])
+    return output_tarball
+
+
+def download_tars(use_gnutls: bool, community: bool, lgpl: bool = False, gpl_child: bool = False) -> None:
     # Try to download all tars at the start.
     # If there is an curl error, do nothing, then try again in `main()`
 
@@ -324,7 +418,7 @@ def download_tars(use_gnutls: bool, community: bool, lgpl: bool = False) -> None
         local_libs += gnutls_group
 
     for package in local_libs + codec_group:
-        if not package_wanted(package, community, lgpl, use_gnutls):
+        if not package_wanted(package, community, lgpl, use_gnutls, gpl_child):
             continue
 
         tarball = os.path.join(
@@ -351,18 +445,24 @@ def main():
         help="Raven's LGPL-2.1 build: community minus x264/x265/gmp/opencore-amr/version3",
     )
     parser.add_argument(
+        "--gpl-child",
+        action="store_true",
+        help="Raven's GPL encoder helper: a static ffmpeg with x264/x265 only (no libraries, no wheel)",
+    )
+    parser.add_argument(
         "--enable-cuda", action="store_true", help="Enable NVIDIA CUDA support"
     )
 
     args = parser.parse_args()
 
-    if sum([args.community, args.commercial, args.lgpl]) > 1:
+    if sum([args.community, args.commercial, args.lgpl, args.gpl_child]) > 1:
         raise ValueError("mutually exclusive")
 
     dest_dir = args.destination
     community = args.community
     lgpl = args.lgpl
-    enable_cuda = args.enable_cuda and plat in {"Linux", "Windows"}
+    gpl_child = args.gpl_child
+    enable_cuda = args.enable_cuda and plat in {"Linux", "Windows"} and not gpl_child
     del args
 
     output_dir = os.path.abspath("output")
@@ -372,7 +472,9 @@ def main():
 
     if plat == "Linux" and os.environ.get("CIBUILDWHEEL") == "1":
         output_dir = "/output"
-    output_tarball = os.path.join(output_dir, f"ffmpeg-{get_platform()}.tar.gz")
+    output_tarball = os.path.join(
+        output_dir, f"ffmpeg-gpl-child-{get_platform()}.tar.gz" if gpl_child else f"ffmpeg-{get_platform()}.tar.gz"
+    )
 
     if os.path.exists(output_tarball):
         return
@@ -380,7 +482,13 @@ def main():
     builder = Builder(dest_dir=dest_dir)
     builder.create_directories()
 
-    download_tars(use_gnutls, community, lgpl)
+    if gpl_child:
+        for package in codec_group:
+            if package.name in GPL_CHILD_PACKAGES:
+                package.static = True
+        ffmpeg_package.static = True
+
+    download_tars(use_gnutls, community, lgpl, gpl_child)
 
     # install packages
     available_tools = set()
@@ -454,7 +562,9 @@ def main():
         "--enable-zlib",
     ]
 
-    if lgpl:
+    if gpl_child:
+        ffmpeg_package.build_arguments = gpl_child_configure_arguments()
+    elif lgpl:
         # LGPL-2.1-or-later: no --enable-version3 (gmp and opencore-amr are the only
         # consumers of it in this recipe and both are off), no GPL and no commercial codecs.
         ffmpeg_package.build_arguments.extend(
@@ -481,14 +591,15 @@ def main():
                 "--enable-gpl",
             ]
         )
-    elif not lgpl:
+    elif not lgpl and not gpl_child:
         ffmpeg_package.build_arguments.extend(
             ["--enable-libopenh264", "--disable-libx264", "--enable-libfdk_aac"]
         )
 
     if plat == "Darwin":
         ffmpeg_package.build_arguments.extend(
-            ["--enable-videotoolbox", "--extra-ldflags=-Wl,-ld_classic"]
+            ["--extra-ldflags=-Wl,-ld_classic"] if gpl_child
+            else ["--enable-videotoolbox", "--extra-ldflags=-Wl,-ld_classic"]
         )
 
     if use_gnutls:
@@ -500,10 +611,17 @@ def main():
     packages = [p for p_list in package_groups for p in p_list]
 
     for package in packages:
-        if not package_wanted(package, community, lgpl, use_gnutls):
+        if not package_wanted(package, community, lgpl, use_gnutls, gpl_child):
             continue
 
         builder.build(package)
+
+    if gpl_child:
+        # Raven --gpl-child: the executable and its corresponding source are the product; the
+        # library steps below (mingw runtime DLLs, import libraries, stripping the DLLs) do not
+        # apply to a static binary.
+        package_gpl_child(dest_dir, output_dir)
+        return
 
     if plat == "Windows":
         # fix .lib files being installed in the wrong directory
