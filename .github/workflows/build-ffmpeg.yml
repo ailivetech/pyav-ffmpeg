@@ -1,18 +1,18 @@
+# Raven's LGPL FFmpeg 7.1 build (https://raven.video). Forked from PyAV-Org/pyav-ffmpeg at
+# tag 7.1-4 -- the recipe that built the PyPI av==14.2.0 wheel -- with an --lgpl mode in
+# scripts/build-ffmpeg.py (community minus x264/x265/gmp/opencore-amr/--enable-version3).
+# Only the two platforms Raven ships are built. A tag matching 7.1-*-raven-lgpl* also
+# attaches the tarballs to a GitHub Release, which is where Raven's ffmpeg_lgpl/fetch_drop.py
+# downloads them from.
 name: build-ffmpeg
+# Builds on a release tag (one ~1-2 h run per tag, both platforms) or by hand; a branch
+# push alone does not build.
 on:
   push:
-    branches: main
-    paths-ignore:
-      - '**.md'
-      - '**.rst'
-      - '**.txt'
-  pull_request:
-    branches: main
-    paths-ignore:
-      - '**.md'
-      - '**.rst'
-      - '**.txt'
+    tags: ['7.1-*-raven-lgpl*']
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -23,21 +23,9 @@ jobs:
           - os: macos-14
             arch: arm64
             shell: bash
-          - os: macos-13
-            arch: x86_64
-            shell: bash
-          - os: ubuntu-24.04
-            arch: i686
-            shell: bash
-          - os: ubuntu-24.04
-            arch: x86_64
-            shell: bash
           - os: windows-latest
             arch: AMD64
             shell: 'msys2 {0}'
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-            shell: bash
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -47,26 +35,25 @@ jobs:
         with:
           python-version: "3.13"
       - name: Set deployment target
-        if: matrix.os == 'macos-13' || matrix.os == 'macos-14'
+        if: matrix.os == 'macos-14'
         run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> $GITHUB_ENV
       - name: Install packages for macOS
-        if: matrix.os == 'macos-13' || matrix.os == 'macos-14'
+        if: matrix.os == 'macos-14'
         run: |
           brew update
-          brew unlink gettext libidn2 libpng libtiff libunistring libx11 libxau libxcb libxdmcp little-cms2 unbound
+          for f in gettext libidn2 libpng libtiff libunistring libx11 libxau libxcb libxdmcp little-cms2 unbound; do brew unlink $f || true; done
       - uses: msys2/setup-msys2@c52d1fa9c7492275e60fe763540fb601f5f232a1
         if: matrix.os == 'windows-latest'
         with:
-          install: base-devel mingw-w64-x86_64-gcc mingw-w64-x86_64-gperf mingw-w64-x86_64-nasm openssl-devel
+          install: base-devel mingw-w64-x86_64-gcc mingw-w64-x86_64-gperf mingw-w64-x86_64-nasm mingw-w64-x86_64-openssl openssl-devel
           path-type: inherit
           release: false
-      - name: Build FFmpeg
+      - name: Build FFmpeg (LGPL)
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_BEFORE_BUILD: python scripts/build-ffmpeg.py /tmp/vendor --community --enable-cuda
-          CIBW_BEFORE_BUILD_WINDOWS: python scripts\build-ffmpeg.py C:\cibw\vendor --community --enable-cuda
+          CIBW_BEFORE_BUILD: python scripts/build-ffmpeg.py /tmp/vendor --lgpl --enable-cuda
+          CIBW_BEFORE_BUILD_WINDOWS: python scripts\build-ffmpeg.py C:\cibw\vendor --lgpl --enable-cuda
           CIBW_BUILD: cp311-*
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: LD_LIBRARY_PATH=/tmp/vendor/lib:$LD_LIBRARY_PATH auditwheel repair -w {dest_dir} {wheel}
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: delvewheel repair --add-path C:\cibw\vendor\bin -w {dest_dir} {wheel}
           CIBW_SKIP: "*musllinux*"
           CIBW_TEST_COMMAND: python -c "import dummy"
@@ -79,3 +66,8 @@ jobs:
         with:
           name: output-${{ matrix.os }}-${{ matrix.arch }}
           path: output/
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/*.tar.gz

@@ -1,3 +1,28 @@
+pyav-ffmpeg -- Raven's LGPL fork
+================================
+
+This is `AI Live Technologies`_' fork of `pyav-ffmpeg`_ for `Raven`_, taken at the
+upstream tag ``7.1-4`` -- the recipe that built the PyPI ``av==14.2.0`` wheel Raven
+shipped with -- and given one new mode, ``scripts/build-ffmpeg.py --lgpl``:
+
+- the upstream ``--community`` package set and configure line, minus ``x264`` and
+  ``x265`` (GPL), minus ``gmp`` and ``opencore-amr`` (the only consumers of
+  ``--enable-version3`` in this recipe), and with ``--enable-version3`` dropped, so
+  ``avcodec_license()`` reads ``LGPL version 2.1 or later``;
+- ``libsrt`` (MPL-2.0), MediaFoundation (Windows), VideoToolbox (macOS) and the
+  NVENC/NVDEC wrappers (``--enable-cuda``) stay exactly as the community build has them;
+- neither ``openh264`` nor ``fdk_aac`` (the commercial variant's codecs) is built.
+
+The workflow builds only Raven's two platforms (macOS arm64, Windows x86_64) and, on a
+``7.1-<n>-raven-lgpl-<m>`` tag, attaches the tarballs to a GitHub Release. Raven's
+``ffmpeg_lgpl/fetch_drop.py`` downloads them from there; Raven's private PyAV wheel is
+built against them (see Raven's ``docs/ffmpeg-gpl-lgpl-split-plan.md``). Everything
+below this section is upstream's README, unchanged.
+
+.. _AI Live Technologies: https://raven.video/
+.. _pyav-ffmpeg: https://github.com/PyAV-Org/pyav-ffmpeg
+.. _Raven: https://raven.video/
+
 pyav-ffmpeg
 ===========
 

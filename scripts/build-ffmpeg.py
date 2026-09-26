@@ -2,12 +2,30 @@ import argparse
 import glob
 import os
 import platform
+import re
 import shutil
 import subprocess
 
 from cibuildpkg import Builder, Package, When, fetch, get_platform, log_group, run
 
 plat = platform.system()
+
+def windows_openssl_root() -> str:
+    r"""Where libsrt's CMake finds OpenSSL on Windows.
+
+    Upstream hard-codes the runner's C:\Program Files\OpenSSL; the windows-2025 image still
+    has that directory but no crypto library in it (CMake: "missing: OPENSSL_CRYPTO_LIBRARY").
+    Raven: the MSYS2 mingw64 prefix that mingw-w64-x86_64-openssl installs into (OpenSSL 3,
+    Apache-2.0), derived from the gcc on PATH, whenever it holds libcrypto; Program Files
+    only as the historical fallback.
+    """
+    gcc = shutil.which("gcc")
+    if gcc:
+        prefix = os.path.dirname(os.path.dirname(gcc))
+        if os.path.exists(os.path.join(prefix, "lib", "libcrypto.dll.a")):
+            return prefix.replace("\\", "/")
+    return r"C:\Program Files\OpenSSL"
+
 
 library_group = [
     Package(
@@ -87,7 +105,10 @@ codec_group = [
     Package(
         name="dav1d",
         requires=["meson", "nasm", "ninja"],
-        source_url="https://code.videolan.org/videolan/dav1d/-/archive/1.4.1/dav1d-1.4.1.tar.bz2",
+        # Raven: VideoLAN's release mirror instead of the GitLab archive endpoint, which served
+        # the GitHub runners a corrupt archive on both platforms (sha256 published beside it:
+        # 8d407dd5fe7986413c937b14e67f36aebd06e1fa5cfec679d10e548476f2d5f8).
+        source_url="https://downloads.videolan.org/pub/videolan/dav1d/1.4.1/dav1d-1.4.1.tar.xz",
         build_system="meson",
     ),
     Package(
@@ -197,7 +218,7 @@ codec_group = [
         source_url="https://github.com/Haivision/srt/archive/refs/tags/v1.5.4.tar.gz",
         build_system="cmake",
         build_arguments=(
-            [r"-DOPENSSL_ROOT_DIR=C:\Program Files\OpenSSL"]
+            ["-DOPENSSL_ROOT_DIR=" + windows_openssl_root()]
             if plat == "Windows"
             else ["-DENABLE_ENCRYPTION=OFF"]
             if plat == "Darwin"
@@ -221,7 +242,80 @@ ffmpeg_package = Package(
 )
 
 
-def download_tars(use_gnutls: bool, community: bool) -> None:
+# Raven (https://raven.video) --lgpl mode: the community build minus every package that would
+# lift FFmpeg's license floor above LGPL-2.1-or-later. x264/x265 are GPL; gmp and the
+# opencore-amr codecs pull in --enable-version3 (LGPL v3); openh264 and fdk_aac belong to the
+# commercial variant. libsrt (MPL-2.0) stays: it is what the community build ships and Raven's
+# SRT legs need it. gmp is still built on Linux, where gnutls's nettle requires it.
+LGPL_EXCLUDED_PACKAGES = {"x264", "x265", "opencore-amr", "openh264", "fdk_aac"}
+
+
+def package_wanted(package: Package, community: bool, lgpl: bool, use_gnutls: bool) -> bool:
+    if package.when == When.never:
+        return False
+    if lgpl:
+        if package.name in LGPL_EXCLUDED_PACKAGES:
+            return False
+        if package.name == "gmp" and not use_gnutls:
+            return False
+        return True
+    if package.when == When.community_only and not community:
+        return False
+    if package.when == When.commercial_only and community:
+        return False
+    return True
+
+
+OPENSSL_SEARCH_DIRS = [r"C:\Program Files\OpenSSL\bin", r"C:\Program Files\OpenSSL"]
+
+
+def copy_openssl_runtime(bin_dir: str) -> None:
+    """Ship the OpenSSL DLLs libsrt.dll imports beside it (Windows).
+
+    libsrt is linked against the runner's OpenSSL (its -DOPENSSL_ROOT_DIR); upstream's
+    tarball leaves those DLLs behind for delvewheel's --add-path to find at wheel-repair
+    time. Raven's drop must load on its own (test_ffmpeg_license.py --dir <drop>/bin), so
+    copy exactly what libsrt.dll imports -- read with objdump, falling back to a glob.
+    """
+    libsrt = os.path.join(bin_dir, "libsrt.dll")
+    if not os.path.exists(libsrt):
+        return
+    wanted = []
+    try:
+        listing = subprocess.run(
+            ["objdump", "-p", libsrt], check=True, stdout=subprocess.PIPE
+        ).stdout.decode(errors="replace")
+        wanted = [
+            m.group(1)
+            for m in re.finditer(r"DLL Name:\s*(\S+)", listing)
+            if m.group(1).lower().startswith(("libcrypto", "libssl"))
+        ]
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"objdump unavailable ({exc}); globbing the OpenSSL runtime instead")
+    search_dirs = OPENSSL_SEARCH_DIRS + os.environ.get("PATH", "").split(os.pathsep)
+    if not wanted:
+        for directory in search_dirs:
+            wanted += [
+                os.path.basename(p)
+                for pattern in ("libcrypto-*.dll", "libssl-*.dll")
+                for p in glob.glob(os.path.join(directory, pattern))
+            ]
+            if wanted:
+                break
+    for name in dict.fromkeys(wanted):
+        for directory in search_dirs:
+            candidate = os.path.join(directory, name)
+            if os.path.exists(candidate):
+                print(f"copying {candidate} -> bin/")
+                shutil.copy(candidate, os.path.join(bin_dir, name))
+                break
+        else:
+            raise FileNotFoundError(
+                f"libsrt.dll imports {name} but it was not found in {search_dirs[:2]} or PATH"
+            )
+
+
+def download_tars(use_gnutls: bool, community: bool, lgpl: bool = False) -> None:
     # Try to download all tars at the start.
     # If there is an curl error, do nothing, then try again in `main()`
 
@@ -230,11 +324,7 @@ def download_tars(use_gnutls: bool, community: bool) -> None:
         local_libs += gnutls_group
 
     for package in local_libs + codec_group:
-        if package.when == When.never:
-            continue
-        if package.when == When.community_only and not community:
-            continue
-        if package.when == When.commercial_only and community:
+        if not package_wanted(package, community, lgpl, use_gnutls):
             continue
 
         tarball = os.path.join(
@@ -256,16 +346,22 @@ def main():
     parser.add_argument("--community", action="store_true")
     parser.add_argument("--commercial", action="store_true")
     parser.add_argument(
+        "--lgpl",
+        action="store_true",
+        help="Raven's LGPL-2.1 build: community minus x264/x265/gmp/opencore-amr/version3",
+    )
+    parser.add_argument(
         "--enable-cuda", action="store_true", help="Enable NVIDIA CUDA support"
     )
 
     args = parser.parse_args()
 
-    if args.community and args.commercial:
+    if sum([args.community, args.commercial, args.lgpl]) > 1:
         raise ValueError("mutually exclusive")
 
     dest_dir = args.destination
     community = args.community
+    lgpl = args.lgpl
     enable_cuda = args.enable_cuda and plat in {"Linux", "Windows"}
     del args
 
@@ -284,7 +380,7 @@ def main():
     builder = Builder(dest_dir=dest_dir)
     builder.create_directories()
 
-    download_tars(use_gnutls, community)
+    download_tars(use_gnutls, community, lgpl)
 
     # install packages
     available_tools = set()
@@ -297,7 +393,9 @@ def main():
             run(["where", tool])
 
     with log_group("install python packages"):
-        run(["pip", "install", "cmake", "meson", "ninja"])
+        # Raven: pinned -- CMake 4 refuses libsrt 1.5.4's cmake_minimum_required (< 3.5);
+        # upstream pinned the same at 7.1.1-5.
+        run(["pip", "install", "cmake==3.31.6", "meson", "ninja"])
 
     # build tools
     if "gperf" not in available_tools:
@@ -334,17 +432,18 @@ def main():
             if plat == "Windows"
             else "--disable-mediafoundation"
         ),
-        "--enable-gmp",
+        "--enable-gmp" if (use_gnutls or not lgpl) else "--disable-gmp",
         "--enable-gnutls" if use_gnutls else "--disable-gnutls",
         "--enable-libaom",
         "--enable-libdav1d",
         "--enable-libmp3lame",
         "--enable-libopencore-amrnb" if community else "--disable-libopencore-amrnb",
         "--enable-libopencore-amrwb" if community else "--disable-libopencore-amrwb",
+        # (lgpl: the AMR codecs stay off -- they are the other --enable-version3 trigger)
         "--enable-libopus",
         "--enable-libspeex",
         "--enable-libsvtav1",
-        "--enable-libsrt" if community else "--disable-libsrt",
+        "--enable-libsrt" if (community or lgpl) else "--disable-libsrt",
         "--enable-libtwolame",
         "--enable-libvorbis",
         "--enable-libvpx",
@@ -353,8 +452,22 @@ def main():
         "--enable-libxml2",
         "--enable-lzma",
         "--enable-zlib",
-        "--enable-version3",
     ]
+
+    if lgpl:
+        # LGPL-2.1-or-later: no --enable-version3 (gmp and opencore-amr are the only
+        # consumers of it in this recipe and both are off), no GPL and no commercial codecs.
+        ffmpeg_package.build_arguments.extend(
+            [
+                "--disable-libopenh264",
+                "--disable-libx264",
+                "--disable-libx265",
+                "--disable-gpl",
+                "--disable-nonfree",
+            ]
+        )
+    else:
+        ffmpeg_package.build_arguments.append("--enable-version3")
 
     if enable_cuda:
         ffmpeg_package.build_arguments.extend(["--enable-nvenc", "--enable-nvdec"])
@@ -368,7 +481,7 @@ def main():
                 "--enable-gpl",
             ]
         )
-    else:
+    elif not lgpl:
         ffmpeg_package.build_arguments.extend(
             ["--enable-libopenh264", "--disable-libx264", "--enable-libfdk_aac"]
         )
@@ -387,11 +500,7 @@ def main():
     packages = [p for p_list in package_groups for p in p_list]
 
     for package in packages:
-        if package.when == When.never:
-            continue
-        if package.when == When.community_only and not community:
-            continue
-        if package.when == When.commercial_only and community:
+        if not package_wanted(package, community, lgpl, use_gnutls):
             continue
 
         builder.build(package)
@@ -429,6 +538,10 @@ def main():
             "zlib1.dll",
         ):
             shutil.copy(os.path.join(mingw_bindir, name), os.path.join(dest_dir, "bin"))
+
+        # Raven --lgpl: make the drop self-contained (libsrt's OpenSSL runtime).
+        if lgpl:
+            copy_openssl_runtime(os.path.join(dest_dir, "bin"))
 
     # find libraries
     if plat == "Darwin":
