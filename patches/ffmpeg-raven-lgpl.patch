@@ -1,0 +1,40 @@
+--- ffmpeg-7.1.orig/libavformat/tls_securetransport.c	2026-10-02 17:39:09
++++ ffmpeg-7.1/libavformat/tls_securetransport.c	2026-10-02 17:39:09
+@@ -16,6 +16,14 @@
+  * You should have received a copy of the GNU Lesser General Public License
+  * along with FFmpeg; if not, write to the Free Software * Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/*
++ * Modified 2026-10-02 by AI Live Technologies LLC (Raven, https://raven.video):
++ * tls_read() and tls_write() hand AVIO_FLAG_NONBLOCK down to the TCP layer, as
++ * tls_openssl.c and tls_schannel.c do. Without it rtmp_write()'s non-blocking
++ * one-byte read (every 10 packets) blocks on the socket and an rtmps:// stream
++ * stalls after its first packets.
+  */
+ 
+ #include <errno.h>
+@@ -366,6 +374,9 @@
+     TLSContext *c = h->priv_data;
+     size_t available = 0, processed = 0;
+     int ret;
++    // Set or clear the AVIO_FLAG_NONBLOCK on c->tls_shared.tcp
++    c->tls_shared.tcp->flags &= ~AVIO_FLAG_NONBLOCK;
++    c->tls_shared.tcp->flags |= h->flags & AVIO_FLAG_NONBLOCK;
+     SSLGetBufferedReadSize(c->ssl_context, &available);
+     if (available)
+         size = FFMIN(available, size);
+@@ -382,7 +393,11 @@
+ {
+     TLSContext *c = h->priv_data;
+     size_t processed = 0;
+-    int ret = SSLWrite(c->ssl_context, buf, size, &processed);
++    int ret;
++    // Set or clear the AVIO_FLAG_NONBLOCK on c->tls_shared.tcp
++    c->tls_shared.tcp->flags &= ~AVIO_FLAG_NONBLOCK;
++    c->tls_shared.tcp->flags |= h->flags & AVIO_FLAG_NONBLOCK;
++    ret = SSLWrite(c->ssl_context, buf, size, &processed);
+     ret = map_ssl_error(ret, processed);
+     if (ret > 0)
+         return ret;

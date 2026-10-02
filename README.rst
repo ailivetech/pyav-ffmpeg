@@ -11,7 +11,12 @@ shipped with -- and given one new mode, ``scripts/build-ffmpeg.py --lgpl``:
   ``avcodec_license()`` reads ``LGPL version 2.1 or later``;
 - ``libsrt`` (MPL-2.0), MediaFoundation (Windows), VideoToolbox (macOS) and the
   NVENC/NVDEC wrappers (``--enable-cuda``) stay exactly as the community build has them;
-- neither ``openh264`` nor ``fdk_aac`` (the commercial variant's codecs) is built.
+- neither ``openh264`` nor ``fdk_aac`` (the commercial variant's codecs) is built;
+- since ``7.1-4-raven-lgpl-2``, FFmpeg's source carries one change, ``patches/ffmpeg-raven-lgpl.patch``
+  (applied by ``--lgpl`` only): ``libavformat/tls_securetransport.c`` hands ``AVIO_FLAG_NONBLOCK``
+  down to its TCP layer, as ``tls_openssl.c`` and ``tls_schannel.c`` do. Without it an
+  ``rtmps://`` stream from macOS stalls after its first 10 packets. The corresponding source of
+  the LGPL libraries is therefore ``ffmpeg-7.1.tar.xz`` plus that patch.
 
 The workflow builds only Raven's two platforms (macOS arm64, Windows x86_64) and, on a
 ``7.1-<n>-raven-lgpl-<m>`` tag, attaches the tarballs to a GitHub Release. Raven's

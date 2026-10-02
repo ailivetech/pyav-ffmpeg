@@ -584,6 +584,13 @@ def main():
                 "--disable-nonfree",
             ]
         )
+        # Raven's one change to FFmpeg's own source, in the LGPL libraries only (the GPL child
+        # stays the unmodified program): libavformat/tls_securetransport.c hands
+        # AVIO_FLAG_NONBLOCK down to its TCP layer, as tls_openssl.c and tls_schannel.c do.
+        # Without it an rtmps:// stream from macOS stalls after its first 10 packets
+        # (rtmp_write's non-blocking one-byte read blocks). The file is compiled on macOS only;
+        # the patch is applied on every platform so one tag is one source.
+        ffmpeg_package.extra_patches = ["ffmpeg-raven-lgpl.patch"]
     else:
         ffmpeg_package.build_arguments.append("--enable-version3")
 
@@ -686,7 +693,11 @@ def main():
 
     # build output tarball
     os.makedirs(output_dir, exist_ok=True)
-    run(["tar", "czvf", output_tarball, "-C", dest_dir, "bin", "include", "lib"])
+    # COPYFILE_DISABLE: as in package_gpl_child() -- a LOCAL macOS build's files carry extended
+    # attributes (com.apple.provenance) and tar would add an AppleDouble "._<name>" entry beside
+    # every one of them (the runner's do not; seen on the first local drop build, 2026-10-02).
+    run(["tar", "czvf", output_tarball, "-C", dest_dir, "bin", "include", "lib"],
+        env={**os.environ, "COPYFILE_DISABLE": "1"})
 
 
 if __name__ == "__main__":

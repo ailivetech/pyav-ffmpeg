@@ -138,6 +138,9 @@ class Package:
     # --disable-shared; cmake: BUILD_SHARED_LIBS=0) so the GPL encoder helper links it in and
     # carries no shared library of its own.
     static: bool = False
+    # Raven --lgpl: further patch files under patches/, applied after <name>.patch. Unlike
+    # <name>.patch (applied by every mode) these are applied only by the mode that names them.
+    extra_patches: list[str] = field(default_factory=list)
 
     def __lt__(self, other):
         return self.name < other.name
@@ -477,6 +480,8 @@ class Builder:
         # apply patch
         if os.path.exists(patch):
             run(["patch", "-d", path, "-i", patch, "-p1"])
+        for extra_patch in package.extra_patches:
+            run(["patch", "-d", path, "-i", os.path.join(self.patch_dir, extra_patch), "-p1"])
 
     def _environment(self, *, for_builder: bool) -> dict[str, str]:
         env = os.environ.copy()
