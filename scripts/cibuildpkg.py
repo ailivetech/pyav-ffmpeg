@@ -361,6 +361,21 @@ class Builder:
             # would have to be merged into one for a static link.
             package.build_arguments = ["-DENABLE_SHARED=0", "-DENABLE_CLI=0"]
             self._build_with_cmake(package=package, for_builder=for_builder)
+            # CMake writes the C++ runtime's implicit link libraries into x265.pc's Libs.private
+            # (`-lstdc++ -lgcc_s -lgcc ...`). On mingw `-lgcc_s` is the IMPORT library for
+            # libgcc_s_seh-1.dll, so a `-static` ffmpeg link that consumes it (pkg-config
+            # --static) still imports that DLL. Drop it: with -static gcc links libgcc +
+            # libgcc_eh itself, which is what the static libstdc++ needs.
+            pc_path = os.path.join(self._prefix(for_builder=for_builder), "lib", "pkgconfig", "x265.pc")
+            with open(pc_path) as fp:
+                pc_lines = fp.read().splitlines()
+            for i, line in enumerate(pc_lines):
+                if line.startswith("Libs.private:"):
+                    words = [w for w in line.split()[1:] if w != "-lgcc_s"]
+                    pc_lines[i] = "Libs.private: " + " ".join(dict.fromkeys(words))
+            with open(pc_path, "w") as fp:
+                fp.write("\n".join(pc_lines) + "\n")
+            print("x265.pc:", next(l for l in pc_lines if l.startswith("Libs.private:")))
             return
 
         # Build x265 three times:

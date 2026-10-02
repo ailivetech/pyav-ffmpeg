@@ -200,7 +200,9 @@ codec_group = [
     ),
     Package(
         name="x264",
-        source_url="https://code.videolan.org/videolan/x264/-/archive/master/x264-master.tar.bz2",
+        # Raven: pinned to a commit of x264's `stable` branch (X264_BUILD 165, 2025-06-08) so the
+        # GPL child and its shipped corresponding source are reproducible; upstream tracked master.
+        source_url="https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2",
         # parallel build runs out of memory on Windows
         build_parallel=plat != "Windows",
         when=When.community_only,
@@ -254,7 +256,9 @@ LGPL_EXCLUDED_PACKAGES = {"x264", "x265", "opencore-amr", "openh264", "fdk_aac"}
 # demuxer/muxer, the rawvideo decoder and the pipe protocol. Raven runs it as a separate process
 # fed over pipes, so it must not carry (or need) any shared FFmpeg library that could be confused
 # with the LGPL one Raven loads in-process. Only these packages are built, all static.
-GPL_CHILD_PACKAGES = {"x264", "x265"}
+# ffmpeg itself is in the set: package_wanted() is the one filter for every build, the program
+# included (the first two workflow runs built the two libraries and then found no executable).
+GPL_CHILD_PACKAGES = {"x264", "x265", "ffmpeg"}
 
 
 def package_wanted(package: Package, community: bool, lgpl: bool, use_gnutls: bool, gpl_child: bool = False) -> bool:
@@ -405,7 +409,11 @@ def package_gpl_child(dest_dir: str, output_dir: str) -> str:
         fp.write(" ".join(ffmpeg_package.build_arguments) + "\n")
     os.makedirs(output_dir, exist_ok=True)
     output_tarball = os.path.join(output_dir, f"ffmpeg-gpl-child-{get_platform()}.tar.gz")
-    run(["tar", "czvf", output_tarball, "-C", staging, "bin", "src", "CONFIGURE.txt"])
+    # COPYFILE_DISABLE: macOS's tar otherwise writes an AppleDouble "._<name>" entry beside every
+    # file that carries extended attributes (the downloaded tarballs do), and those land in
+    # Raven's gpl_encoder_helper/src/ as junk (seen on the first Mac build, 2026-09-26).
+    run(["tar", "czvf", output_tarball, "-C", staging, "bin", "src", "CONFIGURE.txt"],
+        env={**os.environ, "COPYFILE_DISABLE": "1"})
     return output_tarball
 
 
